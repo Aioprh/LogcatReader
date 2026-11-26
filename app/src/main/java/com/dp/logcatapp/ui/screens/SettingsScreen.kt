@@ -83,6 +83,7 @@ import com.dp.logcatapp.ui.common.Dialog
 import com.dp.logcatapp.ui.common.DialogButton
 import com.dp.logcatapp.ui.common.MaybeShowPermissionRequiredDialog
 import com.dp.logcatapp.ui.common.WithTooltip
+import com.dp.logcatapp.ui.common.rememberReadLogsPermissionGranted
 import com.dp.logcatapp.ui.screens.Preference.PreferenceRow
 import com.dp.logcatapp.ui.screens.Preference.SectionDivider
 import com.dp.logcatapp.ui.screens.Preference.SectionName
@@ -90,7 +91,6 @@ import com.dp.logcatapp.ui.theme.AppTypography
 import com.dp.logcatapp.ui.theme.Shapes
 import com.dp.logcatapp.ui.theme.isDynamicThemeAvailable
 import com.dp.logcatapp.util.SettingsPrefKeys
-import com.dp.logcatapp.util.isReadLogsPermissionGranted
 import com.dp.logcatapp.util.rememberBooleanSharedPreference
 import com.dp.logcatapp.util.rememberIntSharedPreference
 import com.dp.logcatapp.util.rememberStringSetSharedPreference
@@ -300,10 +300,7 @@ fun ReadLogsPermissionStatus(
   onClickPermissionNotGranted: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
-  val context = LocalContext.current
-  val hasReadLogsPermission = remember(context) {
-    context.isReadLogsPermissionGranted()
-  }
+  val hasReadLogsPermission = rememberReadLogsPermissionGranted()
   ElevatedCard(
     modifier = modifier
       .clickable(

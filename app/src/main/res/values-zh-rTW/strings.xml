@@ -119,6 +119,7 @@
   <string name="asking_permission_for_root_access">正在請求 Root 存取權限…</string>
   <string name="app_restart_dialog_title">需要重啟應用程式</string>
   <string name="app_restart_dialog_msg_body">點選「確定」將會強制停止應用程式。之後您應能看到完整的日誌列表。</string>
+  <string name="check_permission">檢查權限設定</string>
   <string name="permission_granted_info_title">已授予 READ_LOGS 權限</string>
   <string name="permission_granted_info_body">請注意，如果您沒有立即看到所有日誌，您可能需要等待系統再次要求授予存取日誌的權限，並予以允許。這是由於較新版 Android 系統限制較嚴格所致。</string>
   <string name="select_export_format">選擇匯出格式</string>

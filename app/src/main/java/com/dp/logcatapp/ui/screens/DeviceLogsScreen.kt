@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -114,6 +115,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
+import androidx.core.content.ContextCompat
 import androidx.core.net.toFile
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
@@ -151,6 +153,7 @@ import com.dp.logcatapp.ui.common.SearchLogsTopBar
 import com.dp.logcatapp.ui.common.SnapScrollFab
 import com.dp.logcatapp.ui.common.ToggleableLogItem
 import com.dp.logcatapp.ui.common.WithTooltip
+import com.dp.logcatapp.ui.common.rememberReadLogsPermissionGranted
 import com.dp.logcatapp.ui.theme.AppTypography
 import com.dp.logcatapp.util.AppInfo
 import com.dp.logcatapp.util.SettingsPrefKeys
@@ -247,20 +250,25 @@ fun DeviceLogsScreen(
     mutableFixedCircularBuffer<Log>(capacity = maxLogs)
   }
 
-  val launcher = rememberLauncherForActivityResult(
+  val notificationPermissionLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.RequestPermission()
-  ) { granted ->
-    if (!granted) {
-      // TODO: show help text regarding why we need notifications permission.
-    }
-    viewModel.startService(context)
+  ) {
+    // Nothing to do here: the notification permission only controls whether the foreground service
+    // notification is shown, logcat runs regardless (see the effect below).
   }
 
-  LaunchedEffect(viewModel, launcher) {
-    if (Build.VERSION.SDK_INT >= 33) {
-      launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
-    } else {
-      viewModel.startService(context)
+  LaunchedEffect(viewModel, context, notificationPermissionLauncher) {
+    // Logcat must not depend on the notification permission prompt: starting the foreground service
+    // does not require POST_NOTIFICATIONS, and the permission request can be dropped without ever
+    // invoking the result callback (e.g. when it is issued while the activity is not resumed yet).
+    // Waiting for that callback left the app without any logs in exactly those cases.
+    viewModel.startService(context)
+
+    if (Build.VERSION.SDK_INT >= 33 &&
+      ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+      PackageManager.PERMISSION_GRANTED
+    ) {
+      notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
   }
 
@@ -293,6 +301,26 @@ fun DeviceLogsScreen(
   }
   val lifecycleOwner = LocalLifecycleOwner.current
   var showDisplayOptions by rememberSaveable { mutableStateOf(false) }
+
+  // READ_LOGS is granted from the outside (adb/root), which can happen at any time, even while the
+  // app is in the foreground - so the state is observed rather than read once.
+  val readLogsPermissionGranted = rememberReadLogsPermissionGranted()
+  var previousReadLogsPermissionGranted by remember {
+    mutableStateOf(readLogsPermissionGranted)
+  }
+  var showPermissionDialog by remember { mutableStateOf(false) }
+  val logcatSessionFailed = logcatSessionStatus == LogcatSessionStatusType.FailedToStart
+
+  LaunchedEffect(readLogsPermissionGranted) {
+    if (readLogsPermissionGranted && !previousReadLogsPermissionGranted) {
+      // The permission was granted while the app was running. Any logcat process started before the
+      // grant cannot read logs, so restart the session to pick the permission up.
+      if (viewModel.restartLogcatSession()) {
+        logcatSessionStatus = LogcatSessionStatusType.Starting
+      }
+    }
+    previousReadLogsPermissionGranted = readLogsPermissionGranted
+  }
 
   fun closeSearchBar() {
     showSearchBar = false
@@ -814,7 +842,10 @@ fun DeviceLogsScreen(
       )
     }
 
-    MaybeShowPermissionRequiredDialog()
+    MaybeShowPermissionRequiredDialog(
+      forceShow = logcatSessionFailed || showPermissionDialog,
+      onDismissed = { showPermissionDialog = false },
+    )
 
     if (logcatSessionStatus != LogcatSessionStatusType.Started || logsState.isEmpty()) {
       val message = when (logcatSessionStatus) {
@@ -841,11 +872,21 @@ fun DeviceLogsScreen(
           .safeDrawingPadding(),
         contentAlignment = Alignment.Center,
       ) {
-        StatusMessage(
-          message = message,
-          type = statusType,
-          modifier = Modifier.fillMaxWidth(),
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+          StatusMessage(
+            message = message,
+            type = statusType,
+            modifier = Modifier.fillMaxWidth(),
+          )
+          if (statusType == StatusType.Error) {
+            Spacer(Modifier.height(16.dp))
+            Button(
+              onClick = { showPermissionDialog = true },
+            ) {
+              Text(stringResource(R.string.check_permission))
+            }
+          }
+        }
       }
     } else {
       val lifecycle = LocalLifecycleOwner.current.lifecycle

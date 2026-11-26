@@ -15,6 +15,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,11 +30,11 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import com.dp.logcatapp.BuildConfig
 import com.dp.logcatapp.R
 import com.dp.logcatapp.services.LogcatService
 import com.dp.logcatapp.util.SuCommander
-import com.dp.logcatapp.util.isReadLogsPermissionGranted
 import com.dp.logcatapp.util.rememberBooleanSharedPreference
 import com.dp.logcatapp.util.showToast
 import kotlinx.coroutines.Dispatchers
@@ -49,21 +50,33 @@ fun MaybeShowPermissionRequiredDialog(
   onDismissed: (() -> Unit)? = null,
 ) {
   val context = LocalContext.current
-  val permissionGranted = remember(context) {
-    context.isReadLogsPermissionGranted()
-  }
-  var showPermissionRequiredDialog by remember(permissionGranted, forceShow) {
-    mutableStateOf(!permissionGranted || forceShow)
-  }
+  val permissionGranted = rememberReadLogsPermissionGranted()
+  var showPermissionRequiredDialog by remember { mutableStateOf(false) }
   var showAskingForRootPermissionDialog by remember { mutableStateOf(false) }
   var showRestartAppDialog by remember { mutableStateOf(false) }
   var showManualMethodDialog by remember { mutableStateOf(false) }
   val coroutineScope = rememberCoroutineScope()
 
+  // Show the prompt whenever the permission is missing or the caller explicitly asks for it (e.g.
+  // because the logcat session failed to read logs). This is intentionally driven by the observed
+  // permission state and not by a value captured once at composition time, so that the prompt also
+  // shows up when the permission gets revoked while the app is running.
+  LaunchedEffect(permissionGranted, forceShow) {
+    if (!permissionGranted || forceShow) {
+      showPermissionRequiredDialog = true
+    }
+  }
+
   if (showPermissionRequiredDialog) {
     val failMessage = stringResource(R.string.fail)
     Dialog(
       modifier = Modifier.fillMaxWidth(),
+      // Losing this dialog without granting the permission leaves the app unable to read logs and
+      // with no way to get the prompt back, so it must not be dismissed by tapping outside.
+      properties = DialogProperties(
+        usePlatformDefaultWidth = false,
+        dismissOnClickOutside = false,
+      ),
       primaryButton = DialogButton(
         text = stringResource(R.string.manual_method),
         onClick = {

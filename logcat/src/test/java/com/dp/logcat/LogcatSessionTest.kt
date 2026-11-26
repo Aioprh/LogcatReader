@@ -5,9 +5,12 @@ import com.dp.logcatapp.util.ProcessStarter
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -116,6 +119,23 @@ class LogcatSessionTest {
     val session = createSession(processStarter = mockProcessStarter(failToStart = true))
     assertFalse(session.start())
     session.stop()
+  }
+
+  @Test
+  fun `silentFailure emits when the process exits without producing any logs`() = runTest {
+    val session = createSession()
+    assertTrue(session.start())
+    try {
+      // The process is started successfully but prints nothing, which is what happens when the
+      // READ_LOGS permission is missing.
+      withContext(Dispatchers.IO) {
+        withTimeout(5_000) {
+          session.silentFailure.first()
+        }
+      }
+    } finally {
+      session.stop()
+    }
   }
 
   // -- stop() behavior --

@@ -22,16 +22,19 @@ import com.dp.logcatapp.R
 import com.dp.logcatapp.ui.MainActivity
 import com.dp.logcatapp.util.SettingsPrefKeys
 import com.dp.logcatapp.util.getDefaultSharedPreferences
+import com.dp.logger.Logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 class LogcatService : BaseService() {
@@ -75,8 +78,37 @@ class LogcatService : BaseService() {
     val logcatSession = newLogcatSession()
     if (logcatSession.start()) {
       _logcatSession.value = LogcatSessionStatus.Started(logcatSession)
+      watchForSilentFailure(logcatSession)
     } else {
       _logcatSession.value = LogcatSessionStatus.FailedToStart
+    }
+  }
+
+  /**
+   * Starting the logcat process succeeds even when the app is not allowed to read the log buffers
+   * (which is the case when `READ_LOGS` has not been granted). Logcat then fails to open the log
+   * device and exits immediately, writing the error to stderr only, so the session looks "started"
+   * while it never produces a single log. That left the UI stuck on "Waiting for logs…" forever
+   * without ever showing the permission dialog.
+   *
+   * Detect that and report the session as failed so that the user gets asked to grant the
+   * permission (or to use the root/manual method) instead.
+   */
+  private fun watchForSilentFailure(session: LogcatSession) {
+    lifecycleScope.launch {
+      val failed = withTimeoutOrNull(LOGCAT_START_TIMEOUT_MS) {
+        session.silentFailure.first()
+        true
+      } ?: false
+
+      // The session may have been replaced by a restart in the meantime.
+      if (!failed || _logcatSession.value?.sessionOrNull !== session) {
+        return@launch
+      }
+
+      Logger.debug(TAG, "logcat session failed to read logs")
+      _logcatSession.value = LogcatSessionStatus.FailedToStart
+      withContext(Dispatchers.Default) { session.stop() }
     }
   }
 
@@ -256,8 +288,16 @@ class LogcatService : BaseService() {
   }
 
   companion object {
+    private const val TAG = "LogcatService"
     private const val NOTIFICATION_CHANNEL = "logcat_channel_01"
     private const val NOTIFICATION_ID = 1
+
+    /**
+     * How long to wait for the logcat process to print its first log line before considering the
+     * session to have failed. Logcat dumps the whole buffer right after it starts, so a healthy
+     * process always produces output within a few hundred milliseconds.
+     */
+    private const val LOGCAT_START_TIMEOUT_MS = 5_000L
 
     fun start(context: Context) {
       val intent = Intent(context, LogcatService::class.java)

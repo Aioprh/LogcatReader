@@ -22,6 +22,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import com.dp.logcatapp.ui.theme.AppTypography
 
 data class DialogButton(
@@ -40,6 +41,7 @@ enum class DialogButtonArrangement {
 fun Dialog(
   onDismissRequest: () -> Unit,
   modifier: Modifier = Modifier,
+  properties: DialogProperties = DialogProperties(usePlatformDefaultWidth = false),
   primaryButton: DialogButton? = null,
   secondaryButton: DialogButton? = null,
   arrangement: DialogButtonArrangement = DialogButtonArrangement.Row,
@@ -50,6 +52,7 @@ fun Dialog(
   BasicAlertDialog(
     modifier = modifier,
     onDismissRequest = onDismissRequest,
+    properties = properties,
   ) {
     Surface(
       modifier = Modifier.fillMaxWidth(),

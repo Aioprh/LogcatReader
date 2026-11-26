@@ -16,6 +16,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
@@ -32,6 +33,7 @@ import java.io.BufferedWriter
 import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
@@ -69,6 +71,8 @@ class LogcatSession(
     initialSize = 1000,
   )
   // }
+
+  private val silentFailureFlow = MutableSharedFlow<Unit>(replay = 1)
 
   @Volatile private var active = false
   @Volatile private var paused = false
@@ -110,6 +114,17 @@ class LogcatSession(
       }
     }
   }.buffer(capacity, onBufferOverflow = DROP_OLDEST)
+
+  /**
+   * Emits when the logcat process terminates without having printed a single log line.
+   *
+   * Starting the logcat process succeeds even if the app is not actually allowed to read the log
+   * buffers (for example when `READ_LOGS` has not been granted): logcat then fails to open the log
+   * device and exits right away while writing the error to stderr only. Without this signal such a
+   * session looks perfectly healthy (it is "started") but never produces any logs, which leaves the
+   * UI waiting for logs forever instead of telling the user that the permission is missing.
+   */
+  val silentFailure: Flow<Unit> = silentFailureFlow
 
   suspend fun start(): Boolean {
     val started = suspendCancellableCoroutine { cont ->
@@ -180,6 +195,8 @@ class LogcatSession(
   }
 
   private fun readLogs(process: Process) {
+    val logsRead = AtomicLong()
+    val errorOutput = StringBuilder()
     try {
       val inputStream = process.inputStream
       val errorStream = process.errorStream
@@ -200,11 +217,13 @@ class LogcatSession(
                 synchronized(pendingLogsLock) {
                   pendingLogs += initialLogs
                 }
+                logsRead.addAndGet(initialLogs.size.toLong())
 
                 reader.forEach { log ->
                   synchronized(pendingLogsLock) {
                     pendingLogs += log
                   }
+                  logsRead.incrementAndGet()
                 }
               }
             } catch (_: Exception) {
@@ -220,8 +239,18 @@ class LogcatSession(
         try {
           BufferedReader(InputStreamReader(errorStream)).use {
             val buffer = CharArray(8192)
-            while (it.read(buffer) != -1) {
-              // Just consume it, do nothing.
+            while (true) {
+              val read = it.read(buffer)
+              if (read == -1) {
+                break
+              }
+              // Keep the beginning of stderr around so that a failure to read logs can be
+              // diagnosed (e.g. "failed to open log device: Permission denied").
+              synchronized(errorOutput) {
+                if (errorOutput.length < 1024) {
+                  errorOutput.append(buffer, 0, read)
+                }
+              }
             }
           }
         } catch (_: Exception) {
@@ -234,6 +263,17 @@ class LogcatSession(
       errorStream.close()
       stdoutReaderThread.join(THREAD_JOIN_TIMEOUT)
       stderrReaderThread.join(THREAD_JOIN_TIMEOUT)
+
+      if (logsRead.get() == 0L && !stopped) {
+        // The process was started successfully but never printed anything - most likely because the
+        // log buffers could not be opened (missing READ_LOGS permission).
+        val error = synchronized(errorOutput) { errorOutput.toString().trim() }
+        Logger.debug(
+          LogcatSession::class,
+          "logcat stopped without producing any logs. stderr: $error"
+        )
+        silentFailureFlow.tryEmit(Unit)
+      }
     } catch (_: Exception) {
       Logger.debug(LogcatSession::class, "error reading logs")
     }
