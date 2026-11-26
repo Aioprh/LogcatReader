@@ -51,6 +51,7 @@ private const val SHOW_PERMISSION_GRANTED_INFO_PREF_KEY = "show_permission_info_
 @Composable
 fun MaybeShowPermissionRequiredDialog(
   forceShow: Boolean = false,
+  logcatSessionFailed: Boolean = false,
   onDismissed: (() -> Unit)? = null,
 ) {
   val context = LocalContext.current
@@ -61,10 +62,9 @@ fun MaybeShowPermissionRequiredDialog(
   var showManualMethodDialog by remember { mutableStateOf(false) }
   val coroutineScope = rememberCoroutineScope()
 
-  // Show the prompt whenever the permission is missing or the caller explicitly asks for it (e.g.
-  // because the logcat session failed to read logs). This is intentionally driven by the observed
-  // permission state and not by a value captured once at composition time, so that the prompt also
-  // shows up when the permission gets revoked while the app is running.
+  // Show the prompt whenever the permission is missing. This is intentionally driven by the
+  // observed permission state and not by a value captured once at composition time, so that the
+  // prompt also shows up when the permission gets revoked while the app is running.
   LaunchedEffect(permissionGranted, forceShow) {
     if (!permissionGranted || forceShow) {
       showPermissionRequiredDialog = true
@@ -135,7 +135,9 @@ fun MaybeShowPermissionRequiredDialog(
         Icon(Icons.Default.Info, contentDescription = null)
       }
     )
-  } else if (permissionGranted) {
+  } else if (permissionGranted && !logcatSessionFailed) {
+    // When the session failed there is nothing to celebrate: the error is shown on the logs screen
+    // together with a way to recover.
     val showPermissionInfoDialog = rememberBooleanSharedPreference(
       key = SHOW_PERMISSION_GRANTED_INFO_PREF_KEY,
       default = true,

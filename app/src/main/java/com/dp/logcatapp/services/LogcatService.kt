@@ -21,18 +21,23 @@ import com.dp.logcat.LogcatUtil
 import com.dp.logcatapp.R
 import com.dp.logcatapp.ui.MainActivity
 import com.dp.logcatapp.util.SettingsPrefKeys
+import com.dp.logcatapp.util.isReadLogsPermissionGranted
 import com.dp.logcatapp.util.getDefaultSharedPreferences
 import com.dp.logger.Logger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
@@ -40,8 +45,9 @@ import java.util.Locale
 class LogcatService : BaseService() {
 
   sealed interface LogcatSessionStatus {
+    data object Starting : LogcatSessionStatus
     data class Started(val session: LogcatSession) : LogcatSessionStatus
-    data object FailedToStart : LogcatSessionStatus
+    data class FailedToStart(val reason: String? = null) : LogcatSessionStatus
 
     val sessionOrNull: LogcatSession?
       get() = (this as? Started)?.session
@@ -51,6 +57,9 @@ class LogcatService : BaseService() {
   val logcatSessionStatus = _logcatSession.asStateFlow()
 
   private val restartTrigger = Channel<Unit>(capacity = 1, onBufferOverflow = DROP_OLDEST)
+  private val sessionLock = Mutex()
+  private var automaticRestartCount = 0
+  private var permissionWatcher: Job? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -61,10 +70,7 @@ class LogcatService : BaseService() {
     lifecycleScope.launch {
       startNewLogcatSession()
       restartTrigger.consumeEach {
-        val current = _logcatSession.getAndUpdate { null }
-        current?.sessionOrNull?.let { session ->
-          withContext(Dispatchers.Default) { session.stop() }
-        }
+        automaticRestartCount = 0
         startNewLogcatSession()
       }
     }
@@ -74,41 +80,103 @@ class LogcatService : BaseService() {
     restartTrigger.trySend(Unit)
   }
 
-  private suspend fun startNewLogcatSession() {
-    val logcatSession = newLogcatSession()
-    if (logcatSession.start()) {
-      _logcatSession.value = LogcatSessionStatus.Started(logcatSession)
-      watchForSilentFailure(logcatSession)
-    } else {
-      _logcatSession.value = LogcatSessionStatus.FailedToStart
+  private suspend fun startNewLogcatSession() = sessionLock.withLock {
+    val previous = _logcatSession.getAndUpdate { LogcatSessionStatus.Starting }
+    previous?.sessionOrNull?.let { session ->
+      withContext(Dispatchers.Default) { session.stop() }
     }
+
+    // Without READ_LOGS logcat cannot read anything, so there is no point in spawning the process.
+    if (!isReadLogsPermissionGranted()) {
+      failToStart()
+      return@withLock
+    }
+
+    val logcatSession = newLogcatSession()
+    if (!logcatSession.start()) {
+      failToStart(logcatSession.lastErrorOutput)
+      return@withLock
+    }
+
+    _logcatSession.value = LogcatSessionStatus.Started(logcatSession)
+    watchForFirstLog(logcatSession)
   }
 
   /**
    * Starting the logcat process succeeds even when the app is not allowed to read the log buffers
-   * (which is the case when `READ_LOGS` has not been granted). Logcat then fails to open the log
-   * device and exits immediately, writing the error to stderr only, so the session looks "started"
-   * while it never produces a single log. That left the UI stuck on "Waiting for logs…" forever
-   * without ever showing the permission dialog.
+   * (which is the case when `READ_LOGS` has not been granted). Logcat then either fails to open the
+   * log device and exits immediately, or it blocks waiting on the log daemon, in both cases writing
+   * whatever went wrong to stderr only. The session looks "started" while it never produces a single
+   * log, which left the UI stuck on "Waiting for logs…" forever.
    *
-   * Detect that and report the session as failed so that the user gets asked to grant the
-   * permission (or to use the root/manual method) instead.
+   * A healthy logcat dumps the whole buffer right after it starts, so if nothing arrived within
+   * [FIRST_LOG_TIMEOUT_MS] the session is considered broken: it gets restarted a couple of times
+   * (a permission granted from the outside takes a moment to reach the log daemon) and is reported
+   * as failed afterwards.
    */
-  private fun watchForSilentFailure(session: LogcatSession) {
+  private fun watchForFirstLog(session: LogcatSession) {
     lifecycleScope.launch {
-      val failed = withTimeoutOrNull(LOGCAT_START_TIMEOUT_MS) {
-        session.silentFailure.first()
-        true
-      } ?: false
+      val receivedLog = withTimeoutOrNull(FIRST_LOG_TIMEOUT_MS) {
+        session.firstLogReceived.first { it }
+      } == true
 
       // The session may have been replaced by a restart in the meantime.
-      if (!failed || _logcatSession.value?.sessionOrNull !== session) {
+      if (_logcatSession.value?.sessionOrNull !== session) {
         return@launch
       }
 
-      Logger.debug(TAG, "logcat session failed to read logs")
-      _logcatSession.value = LogcatSessionStatus.FailedToStart
-      withContext(Dispatchers.Default) { session.stop() }
+      if (receivedLog) {
+        automaticRestartCount = 0
+        return@launch
+      }
+
+      Logger.debug(TAG, "logcat session is not producing any logs. stderr: ${session.lastErrorOutput}")
+      handleUnresponsiveSession(session)
+    }
+  }
+
+  private suspend fun handleUnresponsiveSession(session: LogcatSession) {
+    withContext(Dispatchers.Default) { session.stop() }
+    if (_logcatSession.value?.sessionOrNull !== session) {
+      return
+    }
+
+    // A permission that was just granted from the outside (adb/root) is not immediately visible to
+    // the log daemon, so try again a few times before declaring the session as failed.
+    if (isReadLogsPermissionGranted() && automaticRestartCount < MAX_AUTOMATIC_RESTARTS) {
+      automaticRestartCount++
+      _logcatSession.value = LogcatSessionStatus.Starting
+      delay(RESTART_DELAY_MS * automaticRestartCount)
+      startNewLogcatSession()
+    } else {
+      failToStart(session.lastErrorOutput)
+    }
+  }
+
+  private fun failToStart(reason: String? = null) {
+    _logcatSession.value = LogcatSessionStatus.FailedToStart(reason)
+    if (isReadLogsPermissionGranted()) {
+      // The permission is there and reading the logs still failed; retrying on our own will not
+      // help, the user has to restart the app (see the error message on the logs screen).
+      permissionWatcher?.cancel()
+    } else {
+      watchForPermissionToBeGranted()
+    }
+  }
+
+  /**
+   * The permission is not requested from the app but granted from the outside (adb/root), and the
+   * app is not notified about it. Poll for it so that the session recovers without the user having
+   * to restart the app.
+   */
+  private fun watchForPermissionToBeGranted() {
+    permissionWatcher?.cancel()
+    permissionWatcher = lifecycleScope.launch {
+      while (!isReadLogsPermissionGranted()) {
+        delay(PERMISSION_POLL_INTERVAL_MS)
+      }
+      automaticRestartCount = 0
+      startNewLogcatSession()
     }
   }
 
@@ -297,7 +365,17 @@ class LogcatService : BaseService() {
      * session to have failed. Logcat dumps the whole buffer right after it starts, so a healthy
      * process always produces output within a few hundred milliseconds.
      */
-    private const val LOGCAT_START_TIMEOUT_MS = 5_000L
+    private const val FIRST_LOG_TIMEOUT_MS = 3_000L
+
+    /**
+     * How many times a session that produced no logs gets restarted automatically before the
+     * failure is reported (and the user is asked to restart the app).
+     */
+    private const val MAX_AUTOMATIC_RESTARTS = 2
+
+    private const val RESTART_DELAY_MS = 1_500L
+
+    private const val PERMISSION_POLL_INTERVAL_MS = 1_000L
 
     fun start(context: Context) {
       val intent = Intent(context, LogcatService::class.java)

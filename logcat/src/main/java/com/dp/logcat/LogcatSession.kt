@@ -18,6 +18,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
@@ -73,6 +74,14 @@ class LogcatSession(
   // }
 
   private val silentFailureFlow = MutableSharedFlow<Unit>(replay = 1)
+  private val _firstLogReceived = MutableStateFlow(false)
+
+  /**
+   * Stderr output of the logcat process (truncated), meant for diagnosing why no logs are received.
+   */
+  @Volatile
+  var lastErrorOutput: String? = null
+    private set
 
   @Volatile private var active = false
   @Volatile private var paused = false
@@ -125,6 +134,15 @@ class LogcatSession(
    * UI waiting for logs forever instead of telling the user that the permission is missing.
    */
   val silentFailure: Flow<Unit> = silentFailureFlow
+
+  /**
+   * Becomes `true` as soon as the logcat process printed its first log line.
+   *
+   * The process can also be "alive but silent" (logcat blocks waiting on the log daemon when it is
+   * not allowed to read the buffers), in which case [silentFailure] never fires, so whoever started
+   * the session has to look at this flag instead of relying on the process terminating.
+   */
+  val firstLogReceived: StateFlow<Boolean> = _firstLogReceived.asStateFlow()
 
   suspend fun start(): Boolean {
     val started = suspendCancellableCoroutine { cont ->
@@ -217,13 +235,19 @@ class LogcatSession(
                 synchronized(pendingLogsLock) {
                   pendingLogs += initialLogs
                 }
-                logsRead.addAndGet(initialLogs.size.toLong())
+                if (initialLogs.isNotEmpty()) {
+                  logsRead.addAndGet(initialLogs.size.toLong())
+                  _firstLogReceived.value = true
+                }
 
                 reader.forEach { log ->
                   synchronized(pendingLogsLock) {
                     pendingLogs += log
                   }
                   logsRead.incrementAndGet()
+                  if (!_firstLogReceived.value) {
+                    _firstLogReceived.value = true
+                  }
                 }
               }
             } catch (_: Exception) {
@@ -268,6 +292,7 @@ class LogcatSession(
         // The process was started successfully but never printed anything - most likely because the
         // log buffers could not be opened (missing READ_LOGS permission).
         val error = synchronized(errorOutput) { errorOutput.toString().trim() }
+        lastErrorOutput = error.takeIf { it.isNotEmpty() }
         Logger.debug(
           LogcatSession::class,
           "logcat stopped without producing any logs. stderr: $error"

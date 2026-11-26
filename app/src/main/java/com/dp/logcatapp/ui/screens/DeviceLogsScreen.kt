@@ -110,9 +110,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
 import androidx.core.content.ContextCompat
@@ -164,6 +166,7 @@ import com.dp.logcatapp.util.rememberAppInfoByUidMap
 import com.dp.logcatapp.util.rememberBooleanSharedPreference
 import com.dp.logcatapp.util.rememberIntSharedPreference
 import com.dp.logcatapp.util.rememberStringSetSharedPreference
+import com.dp.logcatapp.util.restartApp
 import com.dp.logcatapp.util.showToast
 import com.dp.logcatapp.util.toRegexOrNull
 import com.dp.logger.Logger
@@ -299,28 +302,17 @@ fun DeviceLogsScreen(
   var logcatSessionStatus by remember {
     mutableStateOf<LogcatSessionStatusType>(LogcatSessionStatusType.Starting)
   }
+  // Diagnostic output of the logcat process, shown when reading logs fails.
+  var logcatFailureReason by remember { mutableStateOf<String?>(null) }
   val lifecycleOwner = LocalLifecycleOwner.current
   var showDisplayOptions by rememberSaveable { mutableStateOf(false) }
 
   // READ_LOGS is granted from the outside (adb/root), which can happen at any time, even while the
-  // app is in the foreground - so the state is observed rather than read once.
+  // app is in the foreground - so the state is observed rather than read once. The logcat session
+  // itself is restarted by the service when it notices the grant, see `LogcatService`.
   val readLogsPermissionGranted = rememberReadLogsPermissionGranted()
-  var previousReadLogsPermissionGranted by remember {
-    mutableStateOf(readLogsPermissionGranted)
-  }
   var showPermissionDialog by remember { mutableStateOf(false) }
   val logcatSessionFailed = logcatSessionStatus == LogcatSessionStatusType.FailedToStart
-
-  LaunchedEffect(readLogsPermissionGranted) {
-    if (readLogsPermissionGranted && !previousReadLogsPermissionGranted) {
-      // The permission was granted while the app was running. Any logcat process started before the
-      // grant cannot read logs, so restart the session to pick the permission up.
-      if (viewModel.restartLogcatSession()) {
-        logcatSessionStatus = LogcatSessionStatusType.Starting
-      }
-    }
-    previousReadLogsPermissionGranted = readLogsPermissionGranted
-  }
 
   fun closeSearchBar() {
     showSearchBar = false
@@ -428,6 +420,7 @@ fun DeviceLogsScreen(
                         )
                       }
 
+                      logcatFailureReason = null
                       logcatSessionStatus = LogcatSessionStatusType.Started
 
                       restartLogCollectionTrigger.receiveAsFlow()
@@ -455,7 +448,11 @@ fun DeviceLogsScreen(
                   }
               }
           }
-          LogcatSessionStatus.FailedToStart -> {
+          LogcatSessionStatus.Starting -> {
+            logcatSessionStatus = LogcatSessionStatusType.Starting
+          }
+          is LogcatSessionStatus.FailedToStart -> {
+            logcatFailureReason = status.reason
             logcatSessionStatus = LogcatSessionStatusType.FailedToStart
           }
           null -> {
@@ -843,7 +840,9 @@ fun DeviceLogsScreen(
     }
 
     MaybeShowPermissionRequiredDialog(
-      forceShow = logcatSessionFailed || showPermissionDialog,
+      // Bring the prompt back when the user asks for it from the error screen.
+      forceShow = showPermissionDialog && !readLogsPermissionGranted,
+      logcatSessionFailed = logcatSessionFailed,
       onDismissed = { showPermissionDialog = false },
     )
 
@@ -853,7 +852,11 @@ fun DeviceLogsScreen(
           stringResource(R.string.starting_logcat_session)
         }
         LogcatSessionStatusType.FailedToStart -> {
-          stringResource(R.string.unable_to_start_logcat_error_msg)
+          if (readLogsPermissionGranted) {
+            stringResource(R.string.unable_to_read_logs_error_msg)
+          } else {
+            stringResource(R.string.unable_to_start_logcat_error_msg)
+          }
         }
         LogcatSessionStatusType.Started -> {
           // The logs must be empty at this point.
@@ -879,11 +882,31 @@ fun DeviceLogsScreen(
             modifier = Modifier.fillMaxWidth(),
           )
           if (statusType == StatusType.Error) {
+            logcatFailureReason?.let { reason ->
+              Spacer(Modifier.height(8.dp))
+              Text(
+                text = reason,
+                modifier = Modifier.padding(horizontal = 24.dp),
+                style = MaterialTheme.typography.bodySmall.copy(
+                  fontFamily = FontFamily.Monospace,
+                  fontSize = 11.sp,
+                ),
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
             Spacer(Modifier.height(16.dp))
-            Button(
-              onClick = { showPermissionDialog = true },
-            ) {
-              Text(stringResource(R.string.check_permission))
+            if (readLogsPermissionGranted) {
+              // The permission is there but the logs still cannot be read. This happens when the
+              // app was started before the permission was granted: only a fresh process can read
+              // the log buffers, so offer a one tap restart.
+              Button(onClick = { context.restartApp() }) {
+                Text(stringResource(R.string.restart_app))
+              }
+            } else {
+              Button(onClick = { showPermissionDialog = true }) {
+                Text(stringResource(R.string.check_permission))
+              }
             }
           }
         }
