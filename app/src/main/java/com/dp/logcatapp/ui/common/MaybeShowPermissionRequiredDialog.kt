@@ -15,6 +15,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +32,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.dp.logcatapp.BuildConfig
 import com.dp.logcatapp.R
 import com.dp.logcatapp.services.LogcatService
@@ -64,6 +68,25 @@ fun MaybeShowPermissionRequiredDialog(
   LaunchedEffect(permissionGranted, forceShow) {
     if (!permissionGranted || forceShow) {
       showPermissionRequiredDialog = true
+    }
+  }
+
+  // Coming back to the app without the permission (for example after handing it out via adb, where
+  // the grant may not have taken effect) must ask again - otherwise the prompt that was dismissed
+  // earlier is gone for the rest of the process lifetime and logs can never be recorded.
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner, permissionGranted) {
+    val observer = LifecycleEventObserver { _, event ->
+      val anotherDialogIsOpen = showManualMethodDialog ||
+        showAskingForRootPermissionDialog ||
+        showRestartAppDialog
+      if (event == Lifecycle.Event.ON_RESUME && !permissionGranted && !anotherDialogIsOpen) {
+        showPermissionRequiredDialog = true
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
     }
   }
 
