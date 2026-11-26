@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Poll
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Style
 import androidx.compose.material.icons.filled.Visibility
@@ -256,6 +257,14 @@ fun SettingsScreen(
                   )
                 ),
             )
+            PreferenceType.RunAsRoot -> RunAsRoot(
+              modifier = Modifier
+                .windowInsetsPadding(
+                  WindowInsets.safeDrawing.only(
+                    WindowInsetsSides.Horizontal,
+                  )
+                ),
+            )
             PreferenceType.SaveLocation -> SaveLocation(
               modifier = Modifier
                 .windowInsetsPadding(
@@ -392,6 +401,38 @@ private fun FilterOnSearch(
     },
     supportingContent = {
       Text(stringResource(R.string.pref_general_filter_on_search_desc))
+    },
+    trailingContent = {
+      Switch(
+        checked = preference,
+        onCheckedChange = null,
+      )
+    }
+  )
+}
+
+@Composable
+private fun RunAsRoot(
+  modifier: Modifier = Modifier,
+) {
+  var preference by rememberBooleanSharedPreference(
+    key = SettingsPrefKeys.Logcat.KEY_RUN_AS_ROOT,
+    default = SettingsPrefKeys.Logcat.Default.RUN_AS_ROOT,
+  )
+  ListItem(
+    modifier = modifier
+      .fillMaxWidth()
+      .clickable {
+        preference = !preference
+      },
+    leadingContent = {
+      Icon(Icons.Default.Security, contentDescription = null)
+    },
+    headlineContent = {
+      Text(stringResource(R.string.pref_logcat_run_as_root))
+    },
+    supportingContent = {
+      Text(stringResource(R.string.pref_logcat_run_as_root_desc))
     },
     trailingContent = {
       Switch(
@@ -920,6 +961,7 @@ private val settingRows = listOfNotNull(
   } else null,
   PreferenceRow(PreferenceType.MaxLogs),
   PreferenceRow(PreferenceType.SaveLocation),
+  PreferenceRow(PreferenceType.RunAsRoot),
   SectionDivider,
   SectionName(R.string.about),
   PreferenceRow(PreferenceType.GithubRepoInfo),
@@ -935,6 +977,7 @@ private enum class PreferenceType {
   Buffers,
   MaxLogs,
   SaveLocation,
+  RunAsRoot,
   GithubRepoInfo,
   AppInfo,
   ;

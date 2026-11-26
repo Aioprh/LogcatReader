@@ -49,6 +49,14 @@ class LogcatSession(
   @Volatile
   var pollIntervalMs: Long = 250,
   private val processStarter: ProcessStarter = DefaultProcessStarter(),
+  /**
+   * Runs `logcat` through `su` instead of directly.
+   *
+   * Some vendor ROMs refuse to hand logs to an app process even when `READ_LOGS` is granted (the
+   * log daemon simply stops sending anything), while root can always read them. Starting the
+   * process as root is the only way to get logs on such devices.
+   */
+  private val rootShell: Boolean = false,
 ) {
 
   @Volatile private var record = false
@@ -153,7 +161,12 @@ class LogcatSession(
       logcatThread = thread(name = "logcat-process-starter") {
         // calling runBlocking is fine here since this function runs a separate non-ui thread, and not
         // in a coroutine.
-        val capabilities = runBlocking { logcatCapabilities() }
+        // Root always supports the extra format options, no need to probe them.
+        val capabilities = if (rootShell) {
+          LogcatCapabilities(uidSupported = true, yearSupported = true)
+        } else {
+          runBlocking { logcatCapabilities() }
+        }
         val process = startLogcatProcess(
           uidSupported = capabilities.uidSupported,
           yearSupported = capabilities.yearSupported,
@@ -189,7 +202,7 @@ class LogcatSession(
     uidSupported: Boolean,
     yearSupported: Boolean,
   ): Process? {
-    val cmd = buildList {
+    val args = buildList {
       addAll(listOf("logcat", "-v", "long"))
       if (uidSupported) {
         addAll(listOf("-v", "uid"))
@@ -202,6 +215,7 @@ class LogcatSession(
         add(buffer)
       }
     }
+    val cmd = if (rootShell) listOf("su", "-c", args.joinToString(" ")) else args
     return try {
       processStarter.start(cmd).also { process ->
         logcatProcess = process

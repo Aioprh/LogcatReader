@@ -120,7 +120,10 @@
   <string name="app_restart_dialog_title">需要重啟應用程式</string>
   <string name="app_restart_dialog_msg_body">點選「確定」將會強制停止應用程式。之後您應能看到完整的日誌列表。</string>
   <string name="check_permission">檢查權限設定</string>
+  <string name="pref_logcat_run_as_root">以 root 身分讀取日誌</string>
+  <string name="pref_logcat_run_as_root_desc">透過 su 執行 logcat。部分系統即使已授予 READ_LOGS 也不讓一般應用程式讀取日誌，此時需要開啟此項。</string>
   <string name="restart_app">重新啟動應用</string>
+  <string name="retry">重試</string>
   <string name="unable_to_read_logs_error_msg">已授予 READ_LOGS 權限，但仍無法讀取日誌。這通常是因為授予權限時應用已經在執行，重新啟動應用後即可正常讀取。</string>
   <string name="permission_granted_info_title">已授予 READ_LOGS 權限</string>
   <string name="permission_granted_info_body">請注意，如果您沒有立即看到所有日誌，您可能需要等待系統再次要求授予存取日誌的權限，並予以允許。這是由於較新版 Android 系統限制較嚴格所致。</string>

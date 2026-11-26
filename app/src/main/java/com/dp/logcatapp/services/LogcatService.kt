@@ -21,6 +21,7 @@ import com.dp.logcat.LogcatUtil
 import com.dp.logcatapp.R
 import com.dp.logcatapp.ui.MainActivity
 import com.dp.logcatapp.util.SettingsPrefKeys
+import com.dp.logcatapp.util.SuCommander
 import com.dp.logcatapp.util.isReadLogsPermissionGranted
 import com.dp.logcatapp.util.getDefaultSharedPreferences
 import com.dp.logger.Logger
@@ -61,11 +62,22 @@ class LogcatService : BaseService() {
   private var automaticRestartCount = 0
   private var permissionWatcher: Job? = null
 
+  /**
+   * Whether `logcat` is run through `su`. Reading logs as a normal app is refused by some vendor
+   * ROMs even with `READ_LOGS` granted, root always works.
+   */
+  private var useRoot = false
+  private var suAvailable: Boolean? = null
+
   override fun onCreate() {
     super.onCreate()
     if (Build.VERSION.SDK_INT >= 26) {
       createNotificationChannel()
     }
+    useRoot = getDefaultSharedPreferences().getBoolean(
+      SettingsPrefKeys.Logcat.KEY_RUN_AS_ROOT,
+      SettingsPrefKeys.Logcat.Default.RUN_AS_ROOT,
+    )
 
     lifecycleScope.launch {
       startNewLogcatSession()
@@ -87,7 +99,8 @@ class LogcatService : BaseService() {
     }
 
     // Without READ_LOGS logcat cannot read anything, so there is no point in spawning the process.
-    if (!isReadLogsPermissionGranted()) {
+    // Root does not need the permission.
+    if (!useRoot && !isReadLogsPermissionGranted()) {
       failToStart()
       return@withLock
     }
@@ -148,14 +161,42 @@ class LogcatService : BaseService() {
       _logcatSession.value = LogcatSessionStatus.Starting
       delay(RESTART_DELAY_MS * automaticRestartCount)
       startNewLogcatSession()
-    } else {
-      failToStart(session.lastErrorOutput)
+      return
+    }
+
+    // The permission is there but the log daemon still hands out nothing, which is a known
+    // restriction of some vendor ROMs. Fall back to reading the logs as root.
+    if (!useRoot && isSuAvailable()) {
+      Logger.debug(TAG, "app cannot read logs, retrying as root")
+      enableRootMode()
+      automaticRestartCount = 0
+      startNewLogcatSession()
+      return
+    }
+
+    failToStart(session.lastErrorOutput)
+  }
+
+  private suspend fun isSuAvailable(): Boolean {
+    suAvailable?.let { return it }
+    val available = withContext(Dispatchers.IO) { SuCommander("true").run() }
+    suAvailable = available
+    Logger.debug(TAG, "su available: $available")
+    return available
+  }
+
+  private fun enableRootMode() {
+    if (useRoot) return
+    useRoot = true
+    // The preference change listener is a no-op here because `useRoot` is already updated.
+    getDefaultSharedPreferences().edit {
+      putBoolean(SettingsPrefKeys.Logcat.KEY_RUN_AS_ROOT, true)
     }
   }
 
   private fun failToStart(reason: String? = null) {
     _logcatSession.value = LogcatSessionStatus.FailedToStart(reason)
-    if (isReadLogsPermissionGranted()) {
+    if (useRoot || isReadLogsPermissionGranted()) {
       // The permission is there and reading the logs still failed; retrying on our own will not
       // help, the user has to restart the app (see the error message on the logs screen).
       permissionWatcher?.cancel()
@@ -316,6 +357,17 @@ class LogcatService : BaseService() {
       SettingsPrefKeys.Logcat.KEY_MAX_LOGS -> {
         restartTrigger.trySend(Unit)
       }
+      SettingsPrefKeys.Logcat.KEY_RUN_AS_ROOT -> {
+        val runAsRoot = sharedPreferences.getBoolean(
+          key,
+          SettingsPrefKeys.Logcat.Default.RUN_AS_ROOT,
+        )
+        if (runAsRoot != useRoot) {
+          useRoot = runAsRoot
+          automaticRestartCount = 0
+          restartTrigger.trySend(Unit)
+        }
+      }
     }
   }
 
@@ -351,7 +403,8 @@ class LogcatService : BaseService() {
     return LogcatSession(
       capacity = maxLogs,
       buffers = logcatBuffers,
-      pollIntervalMs = pollInterval.toLong()
+      pollIntervalMs = pollInterval.toLong(),
+      rootShell = useRoot,
     )
   }
 
@@ -371,7 +424,7 @@ class LogcatService : BaseService() {
      * How many times a session that produced no logs gets restarted automatically before the
      * failure is reported (and the user is asked to restart the app).
      */
-    private const val MAX_AUTOMATIC_RESTARTS = 2
+    private const val MAX_AUTOMATIC_RESTARTS = 1
 
     private const val RESTART_DELAY_MS = 1_500L
 

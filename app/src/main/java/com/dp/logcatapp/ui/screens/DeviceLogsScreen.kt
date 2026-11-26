@@ -82,6 +82,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -897,11 +898,22 @@ fun DeviceLogsScreen(
             }
             Spacer(Modifier.height(16.dp))
             if (readLogsPermissionGranted) {
-              // The permission is there but the logs still cannot be read. This happens when the
-              // app was started before the permission was granted: only a fresh process can read
-              // the log buffers, so offer a one tap restart.
-              Button(onClick = { context.restartApp() }) {
-                Text(stringResource(R.string.restart_app))
+              // The permission is there but the logs still cannot be read. Try again with a fresh
+              // logcat process first, and restart the app (the only way to make an already running
+              // process see a permission granted from the outside) as the last resort.
+              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                  onClick = {
+                    if (viewModel.restartLogcatSession()) {
+                      logcatSessionStatus = LogcatSessionStatusType.Starting
+                    }
+                  },
+                ) {
+                  Text(stringResource(R.string.retry))
+                }
+                OutlinedButton(onClick = { context.restartApp() }) {
+                  Text(stringResource(R.string.restart_app))
+                }
               }
             } else {
               Button(onClick = { showPermissionDialog = true }) {

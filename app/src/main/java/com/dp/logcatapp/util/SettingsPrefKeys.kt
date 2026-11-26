@@ -38,12 +38,14 @@ object SettingsPrefKeys {
     const val KEY_BUFFERS = "pref_key_logcat_buffers"
     const val KEY_MAX_LOGS = "pref_key_logcat_max_logs_integer"
     const val KEY_SAVE_LOCATION = "pref_key_logcat_save_location"
+    const val KEY_RUN_AS_ROOT = "pref_key_logcat_run_as_root"
 
     object Default {
       const val POLL_INTERVAL = 250
       val BUFFERS: Set<String> = getDefaultBufferValues()
       const val MAX_LOGS = 100_000
       const val SAVE_LOCATION = ""
+      const val RUN_AS_ROOT = false
 
       private fun getDefaultBufferValues(): Set<String> {
         val bufferValues = mutableSetOf<String>()

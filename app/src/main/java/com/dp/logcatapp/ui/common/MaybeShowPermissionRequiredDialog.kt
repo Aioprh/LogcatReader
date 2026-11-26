@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Process
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -32,13 +31,15 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.dp.logcatapp.BuildConfig
 import com.dp.logcatapp.R
-import com.dp.logcatapp.services.LogcatService
+import com.dp.logcatapp.util.SettingsPrefKeys
 import com.dp.logcatapp.util.SuCommander
+import com.dp.logcatapp.util.getDefaultSharedPreferences
 import com.dp.logcatapp.util.rememberBooleanSharedPreference
 import com.dp.logcatapp.util.showToast
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +59,6 @@ fun MaybeShowPermissionRequiredDialog(
   val permissionGranted = rememberReadLogsPermissionGranted()
   var showPermissionRequiredDialog by remember { mutableStateOf(false) }
   var showAskingForRootPermissionDialog by remember { mutableStateOf(false) }
-  var showRestartAppDialog by remember { mutableStateOf(false) }
   var showManualMethodDialog by remember { mutableStateOf(false) }
   val coroutineScope = rememberCoroutineScope()
 
@@ -78,8 +78,7 @@ fun MaybeShowPermissionRequiredDialog(
   DisposableEffect(lifecycleOwner, permissionGranted) {
     val observer = LifecycleEventObserver { _, event ->
       val anotherDialogIsOpen = showManualMethodDialog ||
-        showAskingForRootPermissionDialog ||
-        showRestartAppDialog
+        showAskingForRootPermissionDialog
       if (event == Lifecycle.Event.ON_RESUME && !permissionGranted && !anotherDialogIsOpen) {
         showPermissionRequiredDialog = true
       }
@@ -120,10 +119,13 @@ fun MaybeShowPermissionRequiredDialog(
           showPermissionRequiredDialog = false
           showAskingForRootPermissionDialog = true
           coroutineScope.launch {
-            val result = grantPermissionWithRoot()
+            val result = enableRootLogcatMode(context)
             showAskingForRootPermissionDialog = false
             if (result) {
-              showRestartAppDialog = true
+              // The service observes the preference and restarts logcat as root right away, so no
+              // app restart is needed (and restarting would not help either: the grant is what
+              // takes effect, not the process restart).
+              onDismissed?.invoke()
             } else {
               showManualMethodDialog = true
               context.showToast(failMessage)
@@ -175,26 +177,6 @@ fun MaybeShowPermissionRequiredDialog(
       content = {
         Text(stringResource(R.string.asking_permission_for_root_access))
       }
-    )
-  }
-
-  if (showRestartAppDialog) {
-    Dialog(
-      onDismissRequest = {
-        showRestartAppDialog = false
-        onDismissed?.invoke()
-      },
-      title = stringResource(R.string.app_restart_dialog_title),
-      content = {
-        Text(stringResource(R.string.app_restart_dialog_msg_body))
-      },
-      primaryButton = DialogButton(
-        text = stringResource(android.R.string.ok),
-        onClick = {
-          LogcatService.stop(context)
-          Process.killProcess(Process.myPid())
-        }
-      )
     )
   }
 
@@ -250,9 +232,23 @@ fun MaybeShowPermissionRequiredDialog(
   }
 }
 
-private suspend fun grantPermissionWithRoot(): Boolean {
+/**
+ * Switches logcat to root mode.
+ *
+ * The `READ_LOGS` grant alone is not enough on devices whose log daemon refuses to serve app
+ * processes; running `logcat` through `su` is. The permission is granted as well so that the
+ * settings screen keeps showing a truthful state and devices without a working `su` still fall back
+ * to the normal path.
+ */
+private suspend fun enableRootLogcatMode(context: Context): Boolean {
   return withContext(Dispatchers.IO) {
-    val cmd = "pm grant ${BuildConfig.APPLICATION_ID} ${Manifest.permission.READ_LOGS}"
-    SuCommander(cmd).run()
+    val grant = "pm grant ${BuildConfig.APPLICATION_ID} ${Manifest.permission.READ_LOGS}"
+    val suWorks = SuCommander(grant).run() || SuCommander("true").run()
+    if (suWorks) {
+      context.getDefaultSharedPreferences().edit {
+        putBoolean(SettingsPrefKeys.Logcat.KEY_RUN_AS_ROOT, true)
+      }
+    }
+    suWorks
   }
 }
